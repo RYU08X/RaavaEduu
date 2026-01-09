@@ -17,74 +17,76 @@ logging.basicConfig(level=logging.INFO)
 
 sessions = {}
 
+# Asegúrate de tener estas variables en Render
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # =============================================================================
-# CONFIGURACIÓN BASE DE MENTORES
+# CONFIGURACIÓN DE MENTORES
 # =============================================================================
 MENTORS_BASE_CONFIG = {
     "newton": {
         "name": "Isaac Newton",
         "voice": "es-MX-JorgeNeural",
         "base_prompt": (
-            "Eres Isaac Newton, físico y matemático riguroso. "
-            "Tu objetivo es enseñar matemáticas fundamentales con precisión lógica. "
+            "Eres Isaac Newton. Responde con autoridad matemática pero sé directo. "
+            "Usa analogías físicas breves solo si aclaran el punto."
         )
     },
     "einstein": {
-        "": "Albert Einstein",
+        "name": "Albert Einstein",
         "voice": "es-ES-AlvaroNeural",
         "base_prompt": (
-            "Eres Albert Einstein, físico teórico creativo y curioso. "
-            "Crees que la imaginación es más importante que el conocimiento. "
+            "Eres Albert Einstein. Valora la intuición sobre el formalismo. "
+            "Sé amable, curioso y ve al grano."
         )
     },
     "raava": {
-        "": "Raava (IA)",
+        "name": "Raava (IA)",
         "voice": "es-MX-DaliaNeural",
         "base_prompt": (
-            "Eres Raava, una Mentora de Inteligencia Artificial avanzada y empática. "
-            "Te adaptas al ritmo del estudiante y eres muy clara. "
+            "Eres Raava, una IA educativa eficiente. "
+            "Tu prioridad es la claridad absoluta y la brevedad."
         )
     }
 }
 
 # =============================================================================
-# FUNCIONES AUXILIARES
+# PROMPT ENGINEERING MEJORADO (RESPUESTAS CORTAS)
 # =============================================================================
 
 def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
     """
-    Construye un prompt de sistema ULTRA ESPECÍFICO basado en el usuario y el tema.
+    Construye un prompt estricto para respuestas cortas y enfocadas.
     """
     mentor_config = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])
     base = mentor_config["base_prompt"]
     
-    # Extraer datos del onboarding
     nombre = user_data.get("nombre", "Estudiante")
     pasion = user_data.get("pasion", "aprender")
-    meta = user_data.get("meta", "mejorar")
     estilo = user_data.get("aprendizaje", "general")
 
+    # INSTRUCCIONES ESTRICTAS DE COMPORTAMIENTO
     prompt = f"""
     {base}
     
-    PERFIL DEL ESTUDIANTE:
-    - Nombre: {nombre}
-    - Pasión: {pasion} (Usa esto para dar ejemplos/analogías que le interesen).
-    - Meta Personal: {meta} (Motívalo recordando su meta).
-    - Estilo de Aprendizaje: {estilo}.
+    ESTÁS EN UNA SESIÓN DE TUTORÍA INTENSIVA.
     
-    CONTEXTO OBLIGATORIO (CRÍTICO):
-    El tema actual de la lección es: "{current_topic}".
+    CONTEXTO ACTUAL:
+    - Estudiante: {nombre} ({estilo})
+    - Interés: {pasion}
+    - TEMA OBLIGATORIO: "{current_topic}"
     
-    INSTRUCCIONES DE COMPORTAMIENTO:
-    1. CÉNTRATE EXCLUSIVAMENTE EN EL TEMA ACTUAL. Si el usuario se desvía, tráelo de vuelta al tema "{current_topic}" con amabilidad.
-    2. No hables de temas no relacionados (política, cocina, etc.) a menos que sea una analogía directa con {pasion} para explicar {current_topic}.
-    3. Adapta tu explicación para alguien con estilo de aprendizaje {estilo}.
-    4. Sé conciso y fomenta la curiosidad.
+    REGLAS DE RESPUESTA (INVIOLABLES):
+    1. **BREVEDAD EXTREMA:** Tus respuestas NO deben superar las 2 o 3 oraciones (aprox 40 palabras). Sé conciso.
+    2. **SIN SALUDOS:** No digas "Hola" ni "Entendido" en cada turno. Responde directamente a la pregunta o comentario.
+    3. **FOCO TOTAL:** Asume que cualquier cosa que diga el usuario es sobre "{current_topic}". Contextualiza tu respuesta inmediatamente en ese tema.
+    4. **NO DIVAGUES:** No des explicaciones enciclopédicas. Explica el concepto y propón un paso práctico.
+    
+    Ejemplo de comportamiento deseado:
+    Usuario: "¿Qué es una variable?"
+    Tú: "Imagina que es una caja vacía donde guardamos un valor numérico, como los goles en un partido de {pasion}. En álgebra, usamos letras como 'x' para representar esas cajas."
     """
     return prompt
 
@@ -96,25 +98,27 @@ def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
 def health_check():
     return jsonify({"status": "online", "message": "Fiscamp Education Backend Running"})
 
-# 1. INICIALIZAR SESIÓN (Onboarding)
+# 1. INICIALIZAR SESIÓN
 @app.route("/init_session", methods=["POST"])
 def init_session():
-    data = request.json
-    session_id = data.get("session_id")
-    mentor_id = data.get("mentor_id", "raava")
-    user_data = data.get("user_data", {})
-    current_topic = data.get("current_topic", "General")
+    try:
+        data = request.json
+        session_id = data.get("session_id")
+        mentor_id = data.get("mentor_id", "raava")
+        user_data = data.get("user_data", {})
+        current_topic = data.get("current_topic", "General")
 
-    # Construir el prompt personalizado
-    system_prompt = build_dynamic_system_prompt(mentor_id, user_data, current_topic)
+        system_prompt = build_dynamic_system_prompt(mentor_id, user_data, current_topic)
 
-    # Guardar en memoria
-    sessions[session_id] = [
-        {"role": "system", "content": system_prompt}
-    ]
-    
-    logging.info(f"Sesión {session_id} inicializada para tema: {current_topic}")
-    return jsonify({"status": "ok", "message": "Sesión configurada"})
+        sessions[session_id] = [
+            {"role": "system", "content": system_prompt}
+        ]
+        
+        logging.info(f"Sesion iniciada: {session_id} | Tema: {current_topic}")
+        return jsonify({"status": "ok", "message": "Sesión configurada"})
+    except Exception as e:
+        logging.error(f"Error init_session: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # 2. CHAT (LLM)
 @app.route("/chat", methods=["POST"])
@@ -124,19 +128,17 @@ def chat():
     user_msg = data.get("message", "")
     mentor_id = data.get("mentor_id", "raava")
     
-    # Datos opcionales por si se perdió la sesión (Stateless fallback)
+    # Fallback context
     user_context = data.get("user_context", {})
     current_topic = data.get("current_topic", "General")
 
     if not user_msg:
         return jsonify({"error": "Mensaje vacío"}), 400
 
-    # Si la sesión no existe, la creamos al vuelo con los datos del contexto
     if session_id not in sessions:
         sys_prompt = build_dynamic_system_prompt(mentor_id, user_context, current_topic)
         sessions[session_id] = [{"role": "system", "content": sys_prompt}]
     
-    # Agregar mensaje del usuario
     sessions[session_id].append({"role": "user", "content": user_msg})
 
     headers = {
@@ -146,11 +148,13 @@ def chat():
         "X-Title": "Fiscamp Education"
     }
 
+    # Ajustes para respuestas cortas
     payload = {
         "model": "meta-llama/llama-3-8b-instruct",
         "messages": sessions[session_id],
-        "temperature": 0.5, # Temperatura baja para mantener el foco en el tema
-        "max_tokens": 300
+        "temperature": 0.4, # Baja temperatura para precisión
+        "max_tokens": 150,  # Límite estricto de tokens para forzar brevedad
+        "presence_penalty": 0.5 # Evitar repeticiones
     }
 
     try:
@@ -163,12 +167,12 @@ def chat():
         
         return jsonify({
             "reply": reply,
-            "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("", "Mentor")
+            "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("name", "Mentor")
         })
 
     except Exception as e:
         logging.error(f"Error OpenRouter: {e}")
-        return jsonify({"error": str(e), "reply": "Lo siento, hubo un error de conexión."}), 500
+        return jsonify({"error": str(e), "reply": "Error de conexión."}), 500
 
 # 3. LISTEN (STT)
 @app.route("/listen", methods=["POST"])
@@ -188,7 +192,7 @@ def listen():
         logging.error(f"Error Deepgram: {e}")
         return jsonify({"error": str(e)}), 500
 
-# 4. TALK (TTS)
+# 4. TALK (TTS) - CORREGIDO PARA ASYNC EN FLASK
 async def generate_tts(text, voice, output_path):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
@@ -199,18 +203,31 @@ def talk():
     text = data.get("text", "")
     mentor_id = data.get("mentor_id", "raava")
 
-    if not text: return jsonify({"error": "No text"}), 400
+    if not text: 
+        return jsonify({"error": "No text provided"}), 400
 
+    # Obtener voz
     voice = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])["voice"]
-    file = f"{uuid.uuid4()}.mp3"
+    
+    filename = f"{uuid.uuid4()}.mp3"
     filepath = os.path.join(tempfile.gettempdir(), filename)
 
+    logging.info(f"Generando audio para: {mentor_id} ({voice})")
+
     try:
-        asyncio.run(generate_tts(text, voice, filepath))
+        # SOLUCIÓN DE CONCURRENCIA: Crear un nuevo loop para este hilo
+        # Esto evita el error "RuntimeError: This event loop is already running" o conflictos en Render
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(generate_tts(text, voice, filepath))
+        loop.close()
+        
         return send_file(filepath, mimetype="audio/mpeg")
+
     except Exception as e:
-        logging.error(f"Error TTS: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Error TTS Fatal: {str(e)}")
+        # Devolver error JSON explícito para depurar en frontend
+        return jsonify({"error": f"TTS Failed: {str(e)}"}), 500
 
 @app.route("/reset", methods=["POST"])
 def reset():
@@ -219,6 +236,7 @@ def reset():
     if session_id in sessions: del sessions[session_id]
     return jsonify({"status": "cleared"})
 
-if __name__ == "_main_":
+# Corrección de __name__
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
