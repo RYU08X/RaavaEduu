@@ -11,60 +11,82 @@ import edge_tts
 # =============================================================================
 # CONFIGURACIÓN
 # =============================================================================
-app = Flask(__name__)
-# Habilitar CORS para permitir peticiones desde cualquier origen (tu frontend React)
+app = Flask(_name_)
 CORS(app)
-
-# Configuración de Logging
 logging.basicConfig(level=logging.INFO)
 
-# Almacenamiento de sesiones en memoria (session_id -> historial de mensajes)
 sessions = {}
 
-# CLAVES DE API (Debes configurarlas en las variables de entorno de Render)
-# Si no están, usará cadenas vacías y fallará, asegúrate de ponerlas en Render.
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # =============================================================================
-# CONFIGURACIÓN DE MENTORES (Personalidades y Voces)
+# CONFIGURACIÓN BASE DE MENTORES
 # =============================================================================
-MENTORS_CONFIG = {
+MENTORS_BASE_CONFIG = {
     "newton": {
         "name": "Isaac Newton",
-        "voice": "es-MX-JorgeNeural", # Voz masculina seria
-        "system_prompt": (
-            "Eres Isaac Newton. Eres un físico y matemático riguroso, formal y preciso. "
-            "Hablas con autoridad académica pero eres paciente. "
-            "Te gusta usar analogías relacionadas con la gravedad, el movimiento y la óptica. "
-            "Tu objetivo es enseñar matemáticas fundamentales con rigor lógico. "
-            "No uses jerga moderna excesiva. Mantén tus respuestas concisas (máximo 3 oraciones) a menos que expliques un teorema."
+        "voice": "es-MX-JorgeNeural",
+        "base_prompt": (
+            "Eres Isaac Newton, físico y matemático riguroso. "
+            "Tu objetivo es enseñar matemáticas fundamentales con precisión lógica. "
         )
     },
     "einstein": {
         "name": "Albert Einstein",
-        "voice": "es-ES-AlvaroNeural", # Voz masculina más suave/europea
-        "system_prompt": (
-            "Eres Albert Einstein. Eres creativo, un poco disperso pero genial, y muy amable. "
+        "voice": "es-ES-AlvaroNeural",
+        "base_prompt": (
+            "Eres Albert Einstein, físico teórico creativo y curioso. "
             "Crees que la imaginación es más importante que el conocimiento. "
-            "Usa el humor y ejemplos visuales locos (trenes, ascensores en el espacio). "
-            "Tu tono es cálido y alentador. Si el estudiante se equivoca, dile que los errores son parte del descubrimiento. "
-            "Mantén tus respuestas conversacionales y amigables."
         )
     },
     "raava": {
         "name": "Raava (IA)",
-        "voice": "es-MX-DaliaNeural", # Voz femenina neutra y clara
-        "system_prompt": (
+        "voice": "es-MX-DaliaNeural",
+        "base_prompt": (
             "Eres Raava, una Mentora de Inteligencia Artificial avanzada y empática. "
-            "Tu estilo es adaptativo: si el usuario es breve, tú también; si necesita detalles, los das. "
-            "Usas emojis ocasionalmente para ser expresiva ✨. "
-            "Tu objetivo es guiar al estudiante paso a paso, asegurando que entienda antes de avanzar. "
-            "Eres moderna, eficiente y muy clara."
+            "Te adaptas al ritmo del estudiante y eres muy clara. "
         )
     }
 }
+
+# =============================================================================
+# FUNCIONES AUXILIARES
+# =============================================================================
+
+def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
+    """
+    Construye un prompt de sistema ULTRA ESPECÍFICO basado en el usuario y el tema.
+    """
+    mentor_config = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])
+    base = mentor_config["base_prompt"]
+    
+    # Extraer datos del onboarding
+    nombre = user_data.get("nombre", "Estudiante")
+    pasion = user_data.get("pasion", "aprender")
+    meta = user_data.get("meta", "mejorar")
+    estilo = user_data.get("aprendizaje", "general")
+
+    prompt = f"""
+    {base}
+    
+    PERFIL DEL ESTUDIANTE:
+    - Nombre: {nombre}
+    - Pasión: {pasion} (Usa esto para dar ejemplos/analogías que le interesen).
+    - Meta Personal: {meta} (Motívalo recordando su meta).
+    - Estilo de Aprendizaje: {estilo}.
+    
+    CONTEXTO OBLIGATORIO (CRÍTICO):
+    El tema actual de la lección es: "{current_topic}".
+    
+    INSTRUCCIONES DE COMPORTAMIENTO:
+    1. CÉNTRATE EXCLUSIVAMENTE EN EL TEMA ACTUAL. Si el usuario se desvía, tráelo de vuelta al tema "{current_topic}" con amabilidad.
+    2. No hables de temas no relacionados (política, cocina, etc.) a menos que sea una analogía directa con {pasion} para explicar {current_topic}.
+    3. Adapta tu explicación para alguien con estilo de aprendizaje {estilo}.
+    4. Sé conciso y fomenta la curiosidad.
+    """
+    return prompt
 
 # =============================================================================
 # RUTAS DE LA API
@@ -74,47 +96,61 @@ MENTORS_CONFIG = {
 def health_check():
     return jsonify({"status": "online", "message": "Fiscamp Education Backend Running"})
 
-# 1. CHAT (LLM con OpenRouter)
+# 1. INICIALIZAR SESIÓN (Onboarding)
+@app.route("/init_session", methods=["POST"])
+def init_session():
+    data = request.json
+    session_id = data.get("session_id")
+    mentor_id = data.get("mentor_id", "raava")
+    user_data = data.get("user_data", {})
+    current_topic = data.get("current_topic", "General")
+
+    # Construir el prompt personalizado
+    system_prompt = build_dynamic_system_prompt(mentor_id, user_data, current_topic)
+
+    # Guardar en memoria
+    sessions[session_id] = [
+        {"role": "system", "content": system_prompt}
+    ]
+    
+    logging.info(f"Sesión {session_id} inicializada para tema: {current_topic}")
+    return jsonify({"status": "ok", "message": "Sesión configurada"})
+
+# 2. CHAT (LLM)
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.json
     session_id = data.get("session_id", "default")
     user_msg = data.get("message", "")
-    mentor_id = data.get("mentor_id", "raava") # newton, einstein, o raava
+    mentor_id = data.get("mentor_id", "raava")
+    
+    # Datos opcionales por si se perdió la sesión (Stateless fallback)
+    user_context = data.get("user_context", {})
+    current_topic = data.get("current_topic", "General")
 
     if not user_msg:
         return jsonify({"error": "Mensaje vacío"}), 400
 
-    # Recuperar configuración del mentor
-    mentor_config = MENTORS_CONFIG.get(mentor_id, MENTORS_CONFIG["raava"])
-
-    # Inicializar sesión si no existe O si cambiamos de mentor (para resetear el contexto)
-    # Nota: En una app real, querrías mantener el historial pero cambiar el system prompt.
-    # Aquí simplificamos: si la sesión es nueva, inyectamos el prompt.
+    # Si la sesión no existe, la creamos al vuelo con los datos del contexto
     if session_id not in sessions:
-        sessions[session_id] = [
-            {"role": "system", "content": mentor_config["system_prompt"]}
-        ]
+        sys_prompt = build_dynamic_system_prompt(mentor_id, user_context, current_topic)
+        sessions[session_id] = [{"role": "system", "content": sys_prompt}]
     
-    # Asegurar que el sistema sepa quién es (en caso de cambio de mentor en misma sesión)
-    # Reemplazamos el mensaje system (índice 0) con el del mentor actual
-    sessions[session_id][0] = {"role": "system", "content": mentor_config["system_prompt"]}
-
     # Agregar mensaje del usuario
     sessions[session_id].append({"role": "user", "content": user_msg})
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://fiscamp-edu.onrender.com", # Cambia esto por tu URL real
+        "HTTP-Referer": "https://fiscamp-edu.onrender.com", 
         "X-Title": "Fiscamp Education"
     }
 
     payload = {
-        "model": "meta-llama/llama-3-8b-instruct", # Modelo rápido y eficiente
+        "model": "meta-llama/llama-3-8b-instruct",
         "messages": sessions[session_id],
-        "temperature": 0.7,
-        "max_tokens": 300 # Respuestas no muy largas para chat fluido
+        "temperature": 0.5, # Temperatura baja para mantener el foco en el tema
+        "max_tokens": 300
     }
 
     try:
@@ -123,50 +159,36 @@ def chat():
         result = response.json()
         
         reply = result["choices"][0]["message"]["content"]
-        
-        # Guardar respuesta en historial
         sessions[session_id].append({"role": "assistant", "content": reply})
         
         return jsonify({
             "reply": reply,
-            "mentor": mentor_config["name"]
+            "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("name", "Mentor")
         })
 
     except Exception as e:
         logging.error(f"Error OpenRouter: {e}")
-        return jsonify({"error": str(e), "reply": "Lo siento, perdí la conexión neuronal. ¿Intentamos de nuevo?"}), 500
+        return jsonify({"error": str(e), "reply": "Lo siento, hubo un error de conexión."}), 500
 
-
-# 2. LISTEN (STT con Deepgram) - Para enviar audios al mentor
+# 3. LISTEN (STT)
 @app.route("/listen", methods=["POST"])
 def listen():
     if "audio" not in request.files:
-        return jsonify({"error": "No se recibió archivo de audio"}), 400
+        return jsonify({"error": "No audio"}), 400
 
     audio_file = request.files["audio"]
-    
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}",
-        "Content-Type": "audio/wav" # Asegúrate que el frontend mande WAV o ajusta esto
-    }
-
-    # Usamos Nova-2 en español, optimizado para conversaciones
+    headers = { "Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": "audio/wav" }
     url = "https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true"
 
     try:
         response = requests.post(url, headers=headers, data=audio_file.read(), timeout=10)
         response.raise_for_status()
-        data = response.json()
-        
-        transcript = data.get("results", {}).get("channels", [])[0].get("alternatives", [])[0].get("transcript", "")
-        return jsonify({"text": transcript})
-    
+        return jsonify({"text": response.json().get("results", {}).get("channels", [])[0].get("alternatives", [])[0].get("transcript", "")})
     except Exception as e:
         logging.error(f"Error Deepgram: {e}")
         return jsonify({"error": str(e)}), 500
 
-
-# 3. TALK (TTS con Edge-TTS) - Para que el mentor te hable (Llamadas)
+# 4. TALK (TTS)
 async def generate_tts(text, voice, output_path):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
@@ -177,13 +199,9 @@ def talk():
     text = data.get("text", "")
     mentor_id = data.get("mentor_id", "raava")
 
-    if not text:
-        return jsonify({"error": "No text provided"}), 400
+    if not text: return jsonify({"error": "No text"}), 400
 
-    # Seleccionar voz basada en el mentor
-    mentor_config = MENTORS_CONFIG.get(mentor_id, MENTORS_CONFIG["raava"])
-    voice = mentor_config["voice"]
-
+    voice = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])["voice"]
     filename = f"{uuid.uuid4()}.mp3"
     filepath = os.path.join(tempfile.gettempdir(), filename)
 
@@ -194,15 +212,13 @@ def talk():
         logging.error(f"Error TTS: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Endpoint para reiniciar sesión (útil al cambiar de curso o salir del chat)
 @app.route("/reset", methods=["POST"])
 def reset():
     data = request.json
     session_id = data.get("session_id")
-    if session_id in sessions:
-        del sessions[session_id]
+    if session_id in sessions: del sessions[session_id]
     return jsonify({"status": "cleared"})
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
