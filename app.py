@@ -34,7 +34,7 @@ MENTORS_BASE_CONFIG = {
         )
     },
     "einstein": {
-        "name": "Albert Einstein",
+        "": "Albert Einstein",
         "voice": "es-ES-AlvaroNeural",
         "base_prompt": (
             "Eres Albert Einstein, físico teórico creativo y curioso. "
@@ -42,7 +42,7 @@ MENTORS_BASE_CONFIG = {
         )
     },
     "raava": {
-        "name": "Raava (IA)",
+        "": "Raava (IA)",
         "voice": "es-MX-DaliaNeural",
         "base_prompt": (
             "Eres Raava, una Mentora de Inteligencia Artificial avanzada y empática. "
@@ -163,7 +163,7 @@ def chat():
         
         return jsonify({
             "reply": reply,
-            "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("name", "Mentor")
+            "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("", "Mentor")
         })
 
     except Exception as e:
@@ -202,7 +202,7 @@ def talk():
     if not text: return jsonify({"error": "No text"}), 400
 
     voice = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])["voice"]
-    filename = f"{uuid.uuid4()}.mp3"
+    file = f"{uuid.uuid4()}.mp3"
     filepath = os.path.join(tempfile.gettempdir(), filename)
 
     try:
@@ -219,6 +219,6 @@ def reset():
     if session_id in sessions: del sessions[session_id]
     return jsonify({"status": "cleared"})
 
-if _name_ == "_main_":
+if __name__ == "_main_":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
