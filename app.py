@@ -11,7 +11,7 @@ import edge_tts
 # =============================================================================
 # CONFIGURACIÓN
 # =============================================================================
-app = Flask(_name_)
+app = Flask(__name__)
 CORS(app)
 logging.basicConfig(level=logging.INFO)
 
