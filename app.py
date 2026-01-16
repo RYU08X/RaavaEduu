@@ -13,12 +13,13 @@ import edge_tts
 # CONFIGURACIÓN GENERAL
 # =============================================================================
 app = Flask(__name__)
+# CORS Permisivo para evitar problemas durante la demo
 CORS(app, resources={r"/*": {"origins": "*"}})
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 sessions = {}
 
-# Variables de Entorno
+# Variables de Entorno (Asegúrate de tenerlas en Render)
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -26,7 +27,6 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 # =============================================================================
 # 🧠 CEREBRO DEL CURRÍCULO (Mapa de ruta para la IA)
 # =============================================================================
-# Esto permite que la IA sepa qué enseñar en cada tema
 TOPIC_CURRICULUM = {
     "Fundamentos Algebraicos": [
         "1. Traducir lenguaje común a lenguaje algebraico (ej. 'un número más cinco')",
@@ -89,7 +89,7 @@ def clean_text_for_tts(text):
     """Elimina markdown y emojis para que el audio suene limpio"""
     clean = text.replace("**", "").replace("*", "")
     clean = clean.replace("- ", "")
-    # Eliminar emojis básicos para que no los lea (opcional, depende del TTS)
+    # Eliminar emojis básicos para que no los lea
     clean = re.sub(r'[^\w\s,¿?.!]', '', clean) 
     return clean
 
@@ -135,7 +135,7 @@ def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return jsonify({"status": "online", "service": "RaavaEdu Backend Pro"})
+    return jsonify({"status": "online", "service": "RaavaEdu Backend (Gemini Powered)"})
 
 # 1. INICIALIZAR SESIÓN
 @app.route("/init_session", methods=["POST"])
@@ -159,7 +159,7 @@ def init_session():
         logging.error(f"❌ Error init_session: {e}")
         return jsonify({"error": str(e)}), 500
 
-# 2. CHAT (LLM)
+# 2. CHAT (LLM) - AHORA CON GEMINI 2.0 FLASH
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
@@ -184,22 +184,28 @@ def chat():
             "X-Title": "Raava Edu"
         }
 
-        # Aumentamos tokens para permitir explicaciones más ricas
+        # --- CAMBIO IMPORTANTE: MODELO GEMINI ---
         payload = {
-            "model": "meta-llama/llama-3-8b-instruct:free",
-            "messages": sessions[session_id][-8:], # Un poco más de memoria
-            "temperature": 0.6, # Un poco más creativo para la empatía
-            "max_tokens": 300   # Permitir respuestas más completas (no cortadas)
+            "model": "google/gemini-2.0-flash-exp:free", # Versión experimental gratuita en OpenRouter
+            "messages": sessions[session_id][-8:], # Memoria de 8 mensajes
+            "temperature": 0.6,
+            "max_tokens": 400   # Gemini suele ser más verboso, damos espacio
         }
 
-        logging.info(f"📤 Enviando a OpenRouter ({mentor_id})...")
+        logging.info(f"📤 Enviando a OpenRouter (Gemini)...")
         response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=25)
         
         if response.status_code != 200:
             logging.error(f"OpenRouter Error: {response.text}")
-            return jsonify({"reply": "¡Ups! Me tropecé con un cable digital 😅. ¿Me lo repites, por favor?"})
+            return jsonify({"reply": "¡Ups! Hubo un pequeño error de conexión con mi cerebro digital 🧠. ¿Podrías repetirlo?"})
 
         result = response.json()
+        
+        # Manejo de errores específicos de OpenRouter en el JSON
+        if 'error' in result:
+             logging.error(f"API Error: {result['error']}")
+             return jsonify({"reply": "Lo siento, estoy teniendo problemas técnicos momentáneos. Intenta de nuevo en un segundo."})
+
         reply = result["choices"][0]["message"]["content"]
         
         sessions[session_id].append({"role": "assistant", "content": reply})
