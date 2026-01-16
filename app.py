@@ -23,7 +23,7 @@ const FormattedText = ({ text }) => {
         if (line.trim().startsWith('- ')) {
           return (
             <div key={i} className="flex gap-2 ml-2">
-              <span className="text-blue-500 font-bold">•</span>
+              <span className="text-blue-500 font-bold"></span>
               <span dangerouslySetInnerHTML={{ 
                 __html: line.substring(2).replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') 
               }} />
