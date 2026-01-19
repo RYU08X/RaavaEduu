@@ -6,4 +6,3 @@ gunicorn==21.2.0
 google-generativeai
 quart
 quart-cors
-hypercorn app:app --bind 0.0.0.0:$PORT
