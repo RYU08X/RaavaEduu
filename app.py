@@ -86,11 +86,25 @@ MENTORS_BASE_CONFIG = {
 # =============================================================================
 
 def clean_text_for_tts(text):
-    """Elimina markdown y emojis para que el audio suene limpio"""
-    clean = text.replace("**", "").replace("*", "")
+    """
+    Limpia el texto para que el audio suene natural.
+    IMPORTANTE: Elimina el bloque <think> de DeepSeek R1.
+    """
+    # 1. Eliminar pensamientos internos de DeepSeek (<think>...</think>)
+    # re.DOTALL permite que el punto (.) coincida también con saltos de línea
+    clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    
+    # 2. Eliminar markdown básico
+    clean = clean.replace("**", "").replace("*", "")
+    clean = clean.replace("###", "").replace("##", "")
     clean = clean.replace("- ", "")
-    # Eliminar emojis básicos para que no los lea
-    clean = re.sub(r'[^\w\s,¿?.!]', '', clean) 
+    
+    # 3. Eliminar emojis y caracteres raros (dejando puntuación básica en español)
+    clean = re.sub(r'[^\w\s,¿?.!áéíóúÁÉÍÓÚñÑ]', '', clean) 
+    
+    # 4. Eliminar espacios múltiples que puedan quedar
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    
     return clean
 
 def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
@@ -135,7 +149,7 @@ def build_dynamic_system_prompt(mentor_id, user_data, current_topic):
 
 @app.route("/", methods=["GET"])
 def health_check():
-    return jsonify({"status": "online", "service": "RaavaEdu Backend (Gemini Lite Powered)"})
+    return jsonify({"status": "online", "service": "RaavaEdu Backend (DeepSeek R1 Powered)"})
 
 # 1. INICIALIZAR SESIÓN
 @app.route("/init_session", methods=["POST"])
@@ -159,7 +173,7 @@ def init_session():
         logging.error(f"❌ Error init_session: {e}")
         return jsonify({"error": str(e)}), 500
 
-# 2. CHAT (LLM) - CORREGIDO A GEMINI FLASH LITE
+# 2. CHAT (LLM) - AHORA CON DEEPSEEK R1 (FREE)
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
@@ -189,38 +203,40 @@ def chat():
             "X-Title": "Raava Edu"
         }
 
-        # --- CAMBIO APLICADO: MODELO GEMINI FLASH LITE ---
+        # --- CAMBIO IMPORTANTE: MODELO DEEPSEEK R1 ---
         payload = {
-            # Usamos el modelo Lite Preview Free. 
-            # Si tienes créditos pagados, puedes cambiarlo a "google/gemini-2.0-flash-001" para más estabilidad
-            "model": "google/gemini-2.0-flash-lite-preview-02-05:free", 
-            "messages": sessions[session_id][-8:], # Memoria de 8 mensajes
+            "model": "deepseek/deepseek-r1:free",  # ID de DeepSeek R1 Gratis en OpenRouter
+            "messages": sessions[session_id][-8:], # Memoria
             "temperature": 0.6,
-            "max_tokens": 400
+            "max_tokens": 1000 # R1 necesita más tokens porque "piensa" antes de escribir
         }
 
-        logging.info(f"📤 Enviando a OpenRouter (Gemini Lite)...")
-        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=25)
+        logging.info(f"📤 Enviando a OpenRouter (DeepSeek R1)...")
+        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=40) # Timeout más largo para R1
         
         if response.status_code != 200:
             logging.error(f"OpenRouter Error Status {response.status_code}: {response.text}")
-            # Mensaje amigable si falla por rate limit otra vez
             if response.status_code == 429:
-                return jsonify({"reply": "¡Vaya! Mi cerebro está un poco saturado ahora mismo (Error 429). ¿Podrías intentar preguntarme de nuevo en 10 segundos?"})
+                return jsonify({"reply": "¡Vaya! Mi cerebro está un poco saturado ahora mismo (Error 429). DeepSeek está muy solicitado. Intenta en 10 seg."})
             return jsonify({"reply": "¡Ups! Hubo un pequeño error de conexión con mi cerebro digital 🧠. ¿Podrías repetirlo?"})
 
         result = response.json()
         
         if 'error' in result:
              logging.error(f"API Error JSON: {result['error']}")
-             return jsonify({"reply": "Lo siento, estoy teniendo problemas técnicos momentáneos con el proveedor de IA. Intenta de nuevo."})
+             return jsonify({"reply": "Lo siento, estoy teniendo problemas técnicos momentáneos con el proveedor de IA."})
 
-        reply = result["choices"][0]["message"]["content"]
+        # Obtenemos la respuesta completa (incluyendo <think>)
+        full_reply = result["choices"][0]["message"]["content"]
         
-        sessions[session_id].append({"role": "assistant", "content": reply})
+        # OPCIONAL: Si quieres guardar la respuesta limpia en el chat history para ahorrar tokens después:
+        # clean_reply = re.sub(r'<think>.*?</think>', '', full_reply, flags=re.DOTALL).strip()
+        
+        # Guardamos la respuesta tal cual (o limpia) en el historial
+        sessions[session_id].append({"role": "assistant", "content": full_reply})
         
         return jsonify({
-            "reply": reply,
+            "reply": full_reply, # El frontend puede decidir si mostrar o ocultar el <think>
             "mentor": MENTORS_BASE_CONFIG.get(mentor_id, {}).get("name", "Mentor")
         })
 
@@ -271,6 +287,7 @@ def talk():
         if not text: 
             return jsonify({"error": "No text provided"}), 400
 
+        # IMPORTANTE: Aquí se limpia el <think> para que NO se escuche en el audio
         text_clean = clean_text_for_tts(text)
         voice = MENTORS_BASE_CONFIG.get(mentor_id, MENTORS_BASE_CONFIG["raava"])["voice"]
         
