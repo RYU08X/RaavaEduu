@@ -3,7 +3,7 @@ uvicorn
 python-multipart
 aiohttp
 requests==2.31.0
-edge-tts>=6.1,<7
+edge-tts>=6.1.12
 gunicorn==21.2.0
 google-generativeai
 openai
