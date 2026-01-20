@@ -5,6 +5,7 @@ import re
 import tempfile
 import asyncio
 from typing import Dict, List, Optional
+import uuid
 
 # --- FASTAPI & ASYNC ---
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -256,23 +257,30 @@ async def listen(audio: UploadFile = File(...)):
 @app.post("/talk")
 async def talk(req: TalkRequest):
     try:
-        # Limpieza simple
-        clean_text = re.sub(r'[*#`]', '', req.text)
+        # 1. Limpieza de texto (Crucial: los asteriscos del LLM causan el error 403)
+        clean_text = re.sub(r'[*#`_~-]', '', req.text)
         
-        voice = MENTORS_CONFIG.get(req.mentor_id, MENTORS_CONFIG["raava"])["voice"]
+        # 2. Obtener la voz del mentor configurado
+        mentor = MENTORS_CONFIG.get(req.mentor_id, MENTORS_CONFIG["raava"])
+        voice = mentor["voice"]
+
+        # 3. Ruta temporal segura (Usa /tmp para evitar errores de permisos)
+        filename = f"voice_{uuid.uuid4().hex}.mp3"
+        temp_path = os.path.join(tempfile.gettempdir(), filename)
+
+        # 4. Lógica de generación (Igual a la de denuncia pero Async nativo)
         communicate = edge_tts.Communicate(clean_text, voice)
-        
-        # Generar archivo temporal
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-            temp_path = fp.name
-            
         await communicate.save(temp_path)
-        
-        # FastAPI maneja el envío de archivos eficientemente
-        return FileResponse(temp_path, media_type="audio/mpeg", filename="voice.mp3")
+
+        # 5. Envío del archivo
+        return FileResponse(
+            temp_path, 
+            media_type="audio/mpeg", 
+            filename="mentor_voice.mp3"
+        )
 
     except Exception as e:
-        logging.error(f"Talk error: {e}")
+        logging.error(f"Error en Talk: {e}")
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 # Para correr en local
