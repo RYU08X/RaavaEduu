@@ -28,7 +28,7 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # 🚀 CAMBIO DE MODELO: Usamos Gemini Flash (Muy rápido y bueno razonando)
 # Alternativa si falla: "meta-llama/llama-3-8b-instruct:free"
-MODEL_NAME = "google/gemini-2.0-flash-lite-preview-02-05:free"
+MODEL_NAME = "google/gemini-2.0-flash-001"
 
 app = FastAPI()
 
