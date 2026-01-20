@@ -6,7 +6,4 @@ requests==2.31.0
 edge-tts>=6.1,<7
 gunicorn==21.2.0
 google-generativeai
-quart
-quart-cors
-hypercorn
 openai
