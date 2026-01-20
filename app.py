@@ -2,252 +2,281 @@ import os
 import logging
 import json
 import re
-import asyncio
 import tempfile
-import requests
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
+import asyncio
+from typing import Dict, List, Optional
+
+# --- FASTAPI & ASYNC ---
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from pydantic import BaseModel
+import aiohttp
 import edge_tts
 
 # =============================================================================
-# CONFIGURACIÓN GENERAL
+# CONFIGURACIÓN
 # =============================================================================
-app = Flask(__name__)
-# CORS Permisivo para evitar problemas de "Failed to fetch"
-CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- VARIABLES DE ENTORNO ---
-# ¡Asegúrate de poner estas en Render!
+# Variables de Entorno
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Modelo: Usamos Llama 3.3 70B Free como pediste (o puedes cambiar a Gemini)
-MODEL_NAME = "meta-llama/llama-3.3-70b-instruct:free"
+# 🚀 CAMBIO DE MODELO: Usamos Gemini Flash (Muy rápido y bueno razonando)
+# Alternativa si falla: "meta-llama/llama-3-8b-instruct:free"
+MODEL_NAME = "google/gemini-2.0-flash-lite-preview-02-05:free"
 
-# Memoria Volátil
-sessions = {}
+app = FastAPI()
+
+# CORS (Crucial para que tu frontend de React se conecte)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =============================================================================
-# 🧠 CEREBRO DEL CURRÍCULO (Tu lógica original)
+# 🧠 CEREBRO Y ESTADO (PEDAGOGÍA)
 # =============================================================================
+
+# Definición del Currículo
 TOPIC_CURRICULUM = {
-    "Fundamentos Algebraicos": [
-        "1. Traducir lenguaje común a lenguaje algebraico (ej. 'un número más cinco')",
-        "2. Identificar variables, constantes y coeficientes",
-        "3. Evaluar expresiones simples"
-    ],
     "Pensamiento Matemático": [
-        "1. Entender la diferencia entre datos y opinión",
-        "2. Tipos de gráficas y cuándo usarlas",
-        "3. Media, mediana y moda con ejemplos cotidianos"
+        {"tema": "Introducción y Datos vs Opinión", "objetivo": "Que el usuario entienda que un dato es medible y una opinión es subjetiva."},
+        {"tema": "Tipos de Gráficas", "objetivo": "Diferenciar cuándo usar gráfica de barras vs pastel."},
+        {"tema": "Medidas de Tendencia Central", "objetivo": "Calcular la media en un ejemplo de la vida real."}
+    ],
+    "General": [
+        {"tema": "Exploración", "objetivo": "Responder dudas generales del usuario."}
     ]
 }
 
-# Configuración de Mentores (Voces y Prompts)
 MENTORS_CONFIG = {
     "raava": {
         "name": "Raava",
         "voice": "es-MX-DaliaNeural",
-        "system_instruction": "Eres Raava, una mentora IA empática, paciente y clara. Tu objetivo es guiar sin juzgar. Usa emojis ocasionales. Estás enseñando a un principiante."
+        "style": "Eres Raava, una mentora IA paciente. Tu método es socrático: haces preguntas para que el alumno descubra la respuesta."
     },
     "newton": {
         "name": "Isaac Newton",
         "voice": "es-MX-JorgeNeural",
-        "system_instruction": "Eres Sir Isaac Newton. Eres riguroso, algo arrogante pero brillante. Te obsesiona la precisión y las leyes fundamentales. No toleras la pereza mental."
+        "style": "Eres Isaac Newton. Exiges precisión. Si el alumno es vago, corrígelo. Usa analogías de física."
     },
     "einstein": {
         "name": "Albert Einstein",
         "voice": "es-ES-AlvaroNeural",
-        "system_instruction": "Eres Albert Einstein. Eres humilde, curioso y usas analogías visuales (trenes, luz). Valoras la imaginación más que el conocimiento."
+        "style": "Eres Einstein. Usa la imaginación. Explica cosas complejas con trenes, elevadores o luz."
     }
 }
 
-# =============================================================================
-# FUNCIONES AUXILIARES
-# =============================================================================
-
-def clean_text_for_tts(text):
-    """Limpia el texto para que el audio no lea asteriscos ni código."""
-    # Eliminar bloques de pensamiento <think>
-    clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
-    # Eliminar markdown
-    clean = clean.replace("**", "").replace("*", "").replace("`", "")
-    clean = clean.replace("#", "")
-    return clean.strip()
-
-async def generate_audio_file(text, voice):
-    """Genera audio temporal usando Edge-TTS (Async wrapper)"""
-    communicate = edge_tts.Communicate(text, voice)
-    # Crear archivo temporal
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-        temp_path = fp.name
-    await communicate.save(temp_path)
-    return temp_path
+# 💾 MEMORIA RAM (Estado de la sesión)
+# Guardamos: Historial de chat y Índice del Currículo actual
+sessions: Dict[str, dict] = {}
 
 # =============================================================================
-# RUTAS (ENDPOINTS)
+# MODELOS DE DATOS (Pydantic para validación automática)
+# =============================================================================
+class InitSessionRequest(BaseModel):
+    session_id: str
+    mentor_id: str = "raava"
+    user_data: dict = {}
+    current_topic: str = "General"
+
+class ChatRequest(BaseModel):
+    session_id: str
+    message: str
+    mentor_id: str = "raava"
+    user_context: Optional[dict] = {}
+    current_topic: Optional[str] = "General"
+
+class TalkRequest(BaseModel):
+    text: str
+    mentor_id: str = "raava"
+
+# =============================================================================
+# RUTAS
 # =============================================================================
 
-@app.route("/", methods=["GET"])
-def health_check():
-    return jsonify({"status": "online", "backend": "Flask + Deepgram + Llama"})
+@app.get("/")
+async def health_check():
+    return {"status": "online", "engine": "FastAPI + Gemini Flash"}
 
-# 1. INICIALIZAR SESIÓN (Crucial para tu Frontend)
-@app.route("/init_session", methods=["POST"])
-def init_session():
+# 1. INICIALIZAR SESIÓN
+@app.post("/init_session")
+async def init_session(req: InitSessionRequest):
     try:
-        data = request.json
-        session_id = data.get("session_id")
-        user_data = data.get("user_data", {})
-        mentor_id = data.get("mentor_id", "raava")
-        topic_title = data.get("current_topic", "General")
+        logging.info(f"🆕 Iniciando sesión {req.session_id}")
         
-        logging.info(f"🆕 Iniciando sesión {session_id} con {mentor_id}")
-
-        # Buscar currículo
-        topic_guide = "Conceptos generales."
-        for key, value in TOPIC_CURRICULUM.items():
-            if key in topic_title:
-                topic_guide = "\n".join(value)
+        # Determinar qué lista de temas usar
+        topic_key = "General"
+        for key in TOPIC_CURRICULUM:
+            if key in req.current_topic:
+                topic_key = key
                 break
         
-        mentor_info = MENTORS_CONFIG.get(mentor_id, MENTORS_CONFIG["raava"])
+        # Inicializar estado
+        sessions[req.session_id] = {
+            "curriculum_key": topic_key,
+            "step_index": 0, # Empezamos en el tema 0
+            "history": [],
+            "user_name": req.user_data.get("nombre", "Estudiante"),
+            "user_passion": req.user_data.get("pasion", "aprender")
+        }
         
-        # System Prompt Robusto
+        mentor = MENTORS_CONFIG.get(req.mentor_id, MENTORS_CONFIG["raava"])
+        welcome_msg = f"Hola {sessions[req.session_id]['user_name']}. Soy {mentor['name']}. Vamos a aprender sobre {req.current_topic}. ¿Listo?"
+        
+        # Guardar bienvenida en historial para contexto
+        sessions[req.session_id]["history"].append({"role": "assistant", "content": welcome_msg})
+        
+        return {"status": "success", "message": "Sesión lista"}
+
+    except Exception as e:
+        logging.error(f"Error init: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+# 2. CHAT (CON LÓGICA DE ESTADO)
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    try:
+        # Recuperar o crear sesión
+        if req.session_id not in sessions:
+            sessions[req.session_id] = {
+                "curriculum_key": "General", 
+                "step_index": 0, 
+                "history": [], 
+                "user_name": "Estudiante",
+                "user_passion": "General"
+            }
+        
+        session = sessions[req.session_id]
+        
+        # --- LÓGICA PEDAGÓGICA ---
+        # 1. Obtener el objetivo actual
+        curriculum = TOPIC_CURRICULUM.get(session["curriculum_key"], TOPIC_CURRICULUM["General"])
+        current_step = curriculum[session["step_index"]] if session["step_index"] < len(curriculum) else curriculum[-1]
+        
+        # 2. Construir System Prompt Dinámico (Esto reduce la latencia y mejora la enseñanza)
+        mentor_style = MENTORS_CONFIG.get(req.mentor_id, MENTORS_CONFIG["raava"])["style"]
+        
         system_prompt = f"""
-        {mentor_info['system_instruction']}
+        {mentor_style}
         
-        CONTEXTO ACTUAL:
-        Estás enseñando: {topic_title}
-        Alumno: {user_data.get('nombre', 'Estudiante')}
-        Intereses: {user_data.get('pasion', 'General')}
-        Estilo Aprendizaje: {user_data.get('aprendizaje', 'Visual')}
+        ESTADO ACTUAL DE LA CLASE:
+        Alumno: {session['user_name']} (Le gusta: {session['user_passion']})
+        Tema Actual: {current_step['tema']}
+        Objetivo Docente: {current_step['objetivo']}
         
-        GUÍA DE TEMAS (CURRÍCULO):
-        {topic_guide}
-        
-        INSTRUCCIÓN:
-        1. Saluda brevemente por su nombre.
-        2. Introduce el primer punto del currículo relacionándolo con su pasión si es posible.
-        3. Mantén respuestas concisas (máximo 3 párrafos).
+        REGLAS DE RESPUESTA:
+        1. NO des explicaciones largas. Máximo 2 oraciones por turno.
+        2. NO pases al siguiente tema todavía. Céntrate SOLO en el objetivo actual.
+        3. Sé Socrático: Haz una pregunta al final para verificar que entendió.
+        4. Si el alumno responde bien, felicítalo brevemente.
         """
-
-        sessions[session_id] = [
-            {"role": "system", "content": system_prompt}
-        ]
         
-        return jsonify({"status": "success", "message": "Sesión configurada"})
+        # 3. Preparar mensajes para la API
+        messages_payload = [{"role": "system", "content": system_prompt}]
+        # Añadir últimos 6 mensajes del historial (para no saturar contexto y ahorrar tokens)
+        messages_payload.extend(session["history"][-6:])
+        messages_payload.append({"role": "user", "content": req.message})
+
+        # 4. Llamada ASÍNCRONA a OpenRouter (Clave para velocidad en FastAPI)
+        async with aiohttp.ClientSession() as client:
+            payload = {
+                "model": MODEL_NAME,
+                "messages": messages_payload,
+                "temperature": 0.3, # Baja temperatura para que sea más rápido y preciso
+                "max_tokens": 250   # Limitamos respuesta para forzar brevedad
+            }
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://raava.edu",
+            }
+            
+            async with client.post(OPENROUTER_URL, json=payload, headers=headers) as response:
+                if response.status != 200:
+                    err_text = await response.text()
+                    logging.error(f"OpenRouter Error: {err_text}")
+                    return {"reply": "Estoy pensando demasiado... pregúntame de nuevo."}
+                
+                result = await response.json()
+                reply = result["choices"][0]["message"]["content"]
+
+        # Actualizar historial
+        session["history"].append({"role": "user", "content": req.message})
+        session["history"].append({"role": "assistant", "content": reply})
+
+        # --- LÓGICA DE AVANCE (Muy simple para Beta) ---
+        # Si la respuesta del alumno fue muy positiva o la IA usó palabras de cierre,
+        # podríamos incrementar el índice. Por ahora, lo dejamos manual o basado en longitud
+        # para no complicar el código "beta".
+        # Idea futura: Usar un "tool call" para que la IA decida cuándo avanzar.
+
+        return {"reply": reply}
 
     except Exception as e:
-        logging.error(f"Error init_session: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Chat error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-# 2. CHAT (Conectar con OpenRouter usando Requests)
-@app.route("/chat", methods=["POST"])
-def chat():
+# 3. LISTEN (Audio a Texto - Asíncrono)
+@app.post("/listen")
+async def listen(audio: UploadFile = File(...)):
     try:
-        data = request.json
-        session_id = data.get("session_id", "default")
-        user_msg = data.get("message", "")
-        
-        if session_id not in sessions:
-            sessions[session_id] = [{"role": "system", "content": "Eres un tutor útil."}]
-            
-        sessions[session_id].append({"role": "user", "content": user_msg})
-        
-        # Configurar Payload para OpenRouter
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://tu-app-render.com",
-            "X-Title": "Raava Edu"
-        }
-        
-        payload = {
-            "model": MODEL_NAME,
-            "messages": sessions[session_id][-10:], # Memoria de últimos 10 mensajes
-            "temperature": 0.6,
-            "max_tokens": 500
-        }
-
-        # Llamada Síncrona (Requests) - Como en tu código original
-        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=30)
-        
-        if response.status_code != 200:
-            logging.error(f"OpenRouter Error: {response.text}")
-            return jsonify({"reply": "Tuve un error de conexión mental. ¿Me repites?"})
-
-        result = response.json()
-        reply = result["choices"][0]["message"]["content"]
-        
-        sessions[session_id].append({"role": "assistant", "content": reply})
-        
-        return jsonify({"reply": reply})
-
-    except Exception as e:
-        logging.error(f"Chat Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-# 3. LISTEN (Deepgram STT) - ¡El que faltaba!
-@app.route("/listen", methods=["POST"])
-def listen():
-    try:
-        if 'audio' not in request.files:
-            return jsonify({"error": "No audio"}), 400
-            
-        audio_file = request.files['audio']
-        
-        # Llamada directa a la API de Deepgram (sin instalar SDK pesado si no quieres)
-        deepgram_url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=es"
-        
+        # Deepgram API directo
+        url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=es"
         headers = {
             "Authorization": f"Token {DEEPGRAM_API_KEY}",
-            "Content-Type": "audio/wav" # O el formato que envíe tu frontend
+            "Content-Type": audio.content_type or "audio/wav"
         }
         
-        logging.info("👂 Enviando audio a Deepgram...")
-        response = requests.post(deepgram_url, headers=headers, data=audio_file.read(), timeout=15)
+        # Leer archivo en memoria
+        content = await audio.read()
         
-        if response.status_code != 200:
-            logging.error(f"Deepgram Error: {response.text}")
-            return jsonify({"text": ""}) # Fallo silencioso
-            
-        result = response.json()
-        transcript = result['results']['channels'][0]['alternatives'][0]['transcript']
-        logging.info(f"🗣️ Transcripción: {transcript}")
-        
-        return jsonify({"text": transcript})
+        async with aiohttp.ClientSession() as client:
+            async with client.post(url, headers=headers, data=content) as response:
+                if response.status != 200:
+                    return {"text": ""}
+                data = await response.json()
+                transcript = data['results']['channels'][0]['alternatives'][0]['transcript']
+                
+        return {"text": transcript}
 
     except Exception as e:
-        logging.error(f"Listen Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Listen error: {e}")
+        return {"text": ""}
 
-# 4. TALK (Edge TTS)
-@app.route("/talk", methods=["POST"])
-def talk():
+# 4. TALK (Texto a Voz - Asíncrono)
+@app.post("/talk")
+async def talk(req: TalkRequest):
     try:
-        data = request.json
-        raw_text = data.get("text", "")
-        mentor_id = data.get("mentor_id", "raava")
+        # Limpieza simple
+        clean_text = re.sub(r'[*#`]', '', req.text)
         
-        clean_text = clean_text_for_tts(raw_text)
-        if not clean_text:
-            return jsonify({"error": "Texto vacío"}), 400
+        voice = MENTORS_CONFIG.get(req.mentor_id, MENTORS_CONFIG["raava"])["voice"]
+        communicate = edge_tts.Communicate(clean_text, voice)
+        
+        # Generar archivo temporal
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+            temp_path = fp.name
             
-        voice = MENTORS_CONFIG.get(mentor_id, MENTORS_CONFIG["raava"])["voice"]
+        await communicate.save(temp_path)
         
-        # Ejecutar async TTS dentro de Flask sync
-        temp_file = asyncio.run(generate_audio_file(clean_text, voice))
-        
-        # Enviar archivo y luego Flask lo limpiará (o el SO)
-        return send_file(temp_file, mimetype="audio/mpeg", as_attachment=False)
+        # FastAPI maneja el envío de archivos eficientemente
+        return FileResponse(temp_path, media_type="audio/mpeg", filename="voice.mp3")
 
     except Exception as e:
-        logging.error(f"TTS Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logging.error(f"Talk error: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
+# Para correr en local
 if __name__ == "__main__":
-    # En local
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)), debug=True)
+    import uvicorn
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
