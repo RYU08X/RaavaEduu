@@ -97,6 +97,8 @@ app.add_middleware(
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -110,6 +112,8 @@ async def security_headers(request: Request, call_next):
 
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
     if not ip:
         ip = request.client.host if request.client else "unknown"
@@ -123,6 +127,8 @@ async def rate_limit_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def size_limit(request: Request, call_next):
+    if request.method == "OPTIONS":
+        return await call_next(request)
     cl = request.headers.get("content-length")
     if cl and int(cl) > MAX_AUDIO_SIZE:
         return JSONResponse(status_code=413, content={"error": "Archivo demasiado grande. Máximo 10MB."})
