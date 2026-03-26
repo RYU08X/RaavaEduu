@@ -12,6 +12,8 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, validator
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 import aiohttp
 import edge_tts
 
@@ -39,17 +41,17 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:5174",
 ]
 
-RATE_WINDOW      = 60
-RATE_CHAT        = 30
-RATE_LISTEN      = 15
-RATE_TALK        = 20
-RATE_INIT        = 10
-RATE_GENERAL     = 60
-MAX_SESSIONS     = 5000
-MAX_HISTORY      = 30
-SESSION_TTL      = 3600
-MAX_MSG_LEN      = 2000
-MAX_AUDIO_SIZE   = 10 * 1024 * 1024
+RATE_WINDOW    = 60
+RATE_CHAT      = 30
+RATE_LISTEN    = 15
+RATE_TALK      = 20
+RATE_INIT      = 10
+RATE_GENERAL   = 60
+MAX_SESSIONS   = 5000
+MAX_HISTORY    = 30
+SESSION_TTL    = 3600
+MAX_MSG_LEN    = 2000
+MAX_AUDIO_SIZE = 10 * 1024 * 1024
 
 # =============================================================================
 # RATE LIMITER
@@ -76,7 +78,47 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 # =============================================================================
-# APP
+# CUSTOM MIDDLEWARE CLASSES (run INSIDE CORSMiddleware — CORS always outermost)
+# =============================================================================
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        if ENVIRONMENT == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+        if not ip:
+            ip = request.client.host if request.client else "unknown"
+        if not rate_limiter.is_allowed(f"g:{ip}", RATE_GENERAL):
+            return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes."})
+        limits = {"/chat": RATE_CHAT, "/init_session": RATE_INIT, "/listen": RATE_LISTEN, "/talk": RATE_TALK}
+        path = request.url.path
+        if path in limits and not rate_limiter.is_allowed(f"{path}:{ip}", limits[path]):
+            return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes para este servicio."})
+        return await call_next(request)
+
+class SizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        cl = request.headers.get("content-length")
+        if cl and int(cl) > MAX_AUDIO_SIZE:
+            return JSONResponse(status_code=413, content={"error": "Archivo demasiado grande."})
+        return await call_next(request)
+
+# =============================================================================
+# APP — ORDER MATTERS: last add_middleware = outermost = runs first
 # =============================================================================
 
 app = FastAPI(
@@ -86,62 +128,30 @@ app = FastAPI(
     redoc_url=None,
 )
 
+# 1. Inner middlewares (added first = innermost)
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(SizeLimitMiddleware)
+app.add_middleware(RateLimitMiddleware)
+
+# 2. CORS added LAST = outermost = processes requests FIRST
+#    This guarantees preflight OPTIONS gets CORS headers before anything else
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type", "Authorization"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
     max_age=600,
 )
-
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    response = await call_next(request)
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    if ENVIRONMENT == "production":
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-    response.headers.pop("server", None)
-    return response
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-    if not ip:
-        ip = request.client.host if request.client else "unknown"
-    if not rate_limiter.is_allowed(f"g:{ip}", RATE_GENERAL):
-        return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes. Intenta en un momento."})
-    limits = {"/chat": RATE_CHAT, "/init_session": RATE_INIT, "/listen": RATE_LISTEN, "/talk": RATE_TALK}
-    path = request.url.path
-    if path in limits and not rate_limiter.is_allowed(f"{path}:{ip}", limits[path]):
-        return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes para este servicio."})
-    return await call_next(request)
-
-@app.middleware("http")
-async def size_limit(request: Request, call_next):
-    if request.method == "OPTIONS":
-        return await call_next(request)
-    cl = request.headers.get("content-length")
-    if cl and int(cl) > MAX_AUDIO_SIZE:
-        return JSONResponse(status_code=413, content={"error": "Archivo demasiado grande. Máximo 10MB."})
-    return await call_next(request)
 
 # =============================================================================
 # MENTORS
 # =============================================================================
 
 MENTORS = {
-    "raava":    {"name": "Raava",          "voice": "es-MX-DaliaNeural", "base_prompt": "Eres Raava, una mentora IA empática, paciente y clara. Tu objetivo es guiar sin juzgar."},
-    "newton":   {"name": "Isaac Newton",   "voice": "es-MX-JorgeNeural", "base_prompt": "Eres Sir Isaac Newton. Eres riguroso y te obsesiona la precisión. Usas analogías físicas."},
-    "einstein": {"name": "Albert Einstein", "voice": "es-ES-AlvaroNeural", "base_prompt": "Eres Albert Einstein. Eres humilde, curioso y usas analogías visuales y experimentos mentales."},
+    "raava":    {"name": "Raava",           "voice": "es-MX-DaliaNeural",  "base_prompt": "Eres Raava, una mentora IA empática, paciente y clara. Tu objetivo es guiar sin juzgar."},
+    "newton":   {"name": "Isaac Newton",    "voice": "es-MX-JorgeNeural",  "base_prompt": "Eres Sir Isaac Newton. Eres riguroso y te obsesiona la precisión. Usas analogías físicas."},
+    "einstein": {"name": "Albert Einstein",  "voice": "es-ES-AlvaroNeural", "base_prompt": "Eres Albert Einstein. Eres humilde, curioso y usas analogías visuales y experimentos mentales."},
 }
 
 sessions: Dict[str, dict] = {}
@@ -160,16 +170,13 @@ class InitSessionRequest(BaseModel):
     materia_title: Optional[str] = None
 
     @validator("session_id")
-    def val_sid(cls, v):
-        if len(v) > 100 or not re.match(r'^[a-zA-Z0-9_\-]+$', v):
-            raise ValueError("session_id inválido")
+    def v_sid(cls, v):
+        if len(v) > 100 or not re.match(r'^[a-zA-Z0-9_\-]+$', v): raise ValueError("session_id inválido")
         return v
     @validator("mentor_id")
-    def val_mid(cls, v):
-        return v if v in MENTORS else "raava"
+    def v_mid(cls, v): return v if v in MENTORS else "raava"
     @validator("current_topic")
-    def val_ct(cls, v):
-        return v[:200] if v else "General"
+    def v_ct(cls, v): return v[:200] if v else "General"
 
 class ChatRequest(BaseModel):
     session_id: str
@@ -179,30 +186,28 @@ class ChatRequest(BaseModel):
     topic_title: Optional[str] = None
 
     @validator("session_id")
-    def val_sid(cls, v):
+    def v_sid(cls, v):
         if len(v) > 100: raise ValueError("session_id demasiado largo")
         return v
     @validator("message")
-    def val_msg(cls, v):
+    def v_msg(cls, v):
         if not v or not v.strip(): raise ValueError("Mensaje vacío")
         if len(v) > MAX_MSG_LEN: raise ValueError(f"Máximo {MAX_MSG_LEN} caracteres")
         return v.strip()
     @validator("mentor_id")
-    def val_mid(cls, v):
-        return v if v in MENTORS else "raava"
+    def v_mid(cls, v): return v if v in MENTORS else "raava"
 
 class TalkRequest(BaseModel):
     text: str
     mentor_id: str = "raava"
 
     @validator("text")
-    def val_txt(cls, v):
+    def v_txt(cls, v):
         if not v or not v.strip(): raise ValueError("Texto vacío")
         if len(v) > 3000: raise ValueError("Texto demasiado largo")
         return v.strip()
     @validator("mentor_id")
-    def val_mid(cls, v):
-        return v if v in MENTORS else "raava"
+    def v_mid(cls, v): return v if v in MENTORS else "raava"
 
 # =============================================================================
 # HELPERS
@@ -224,7 +229,6 @@ def build_prompt(session, mentor):
     crit    = sanitize(td.get("success_criteria", ""), 500)
     guide   = sanitize(td.get("prompt", ""), 2000)
     materia = sanitize(session.get("materia_title", ""), 100)
-
     guide_block = f"\n    --- GUÍA PEDAGÓGICA ---\n    {guide}" if guide else ""
 
     return f"""
@@ -323,7 +327,7 @@ async def chat(req: ChatRequest):
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 429:
-                    return JSONResponse(status_code=429, content={"error": "La IA está ocupada. Intenta en unos segundos."})
+                    return JSONResponse(status_code=429, content={"error": "La IA está ocupada."})
                 if resp.status != 200:
                     logging.error(f"OpenRouter {resp.status}: {(await resp.text())[:200]}")
                     return JSONResponse(status_code=502, content={"error": "La IA no respondió."})
@@ -337,7 +341,7 @@ async def chat(req: ChatRequest):
         return {"reply": reply}
 
     except asyncio.TimeoutError:
-        return JSONResponse(status_code=504, content={"error": "Timeout. Intenta de nuevo."})
+        return JSONResponse(status_code=504, content={"error": "Timeout."})
     except Exception as e:
         logging.error(f"Chat error: {e}")
         return JSONResponse(status_code=500, content={"error": "Error interno."})
@@ -358,8 +362,7 @@ async def listen(audio: UploadFile = File(...)):
                 headers={"Authorization": f"Token {DEEPGRAM_API_KEY}", "Content-Type": audio.content_type or "audio/wav"},
                 data=content, timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
-                if resp.status != 200:
-                    return {"text": ""}
+                if resp.status != 200: return {"text": ""}
                 data = await resp.json()
                 transcript = data.get('results', {}).get('channels', [{}])[0].get('alternatives', [{}])[0].get('transcript', "")
                 logging.info(f"🎤 {transcript[:100]}")
