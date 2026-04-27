@@ -7,3 +7,5 @@ edge-tts>=6.1.12
 gunicorn==21.2.0
 google-generativeai
 openai
+supabase
+pydantic
