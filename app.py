@@ -17,6 +17,9 @@ from starlette.responses import Response
 import aiohttp
 import edge_tts
 
+# Integración con Supabase
+from supabase import create_client, Client
+
 # =============================================================================
 # CONFIG
 # =============================================================================
@@ -26,6 +29,17 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 DEEPGRAM_API_KEY   = os.getenv("DEEPGRAM_API_KEY", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 ENVIRONMENT        = os.getenv("ENVIRONMENT", "production")
+
+# Configuración de Supabase
+SUPABASE_URL = os.getenv("VITE_SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", os.getenv("VITE_SUPABASE_ANON_KEY", ""))
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logging.info("✅ Cliente Supabase inicializado correctamente.")
+else:
+    supabase = None
+    logging.warning("⚠️ Credenciales de Supabase no encontradas. El historial no se guardará.")
 
 MODEL_NAME     = "google/gemini-2.0-flash-001"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -78,7 +92,7 @@ class RateLimiter:
 rate_limiter = RateLimiter()
 
 # =============================================================================
-# CUSTOM MIDDLEWARE CLASSES (run INSIDE CORSMiddleware — CORS always outermost)
+# CUSTOM MIDDLEWARE CLASSES
 # =============================================================================
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -118,23 +132,20 @@ class SizeLimitMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 # =============================================================================
-# APP — ORDER MATTERS: last add_middleware = outermost = runs first
+# APP
 # =============================================================================
 
 app = FastAPI(
     title="Raava Edu API",
-    version="3.1.0",
+    version="3.2.0",
     docs_url="/docs" if ENVIRONMENT == "development" else None,
     redoc_url=None,
 )
 
-# 1. Inner middlewares (added first = innermost)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(SizeLimitMiddleware)
 app.add_middleware(RateLimitMiddleware)
 
-# 2. CORS added LAST = outermost = processes requests FIRST
-#    This guarantees preflight OPTIONS gets CORS headers before anything else
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -149,7 +160,7 @@ app.add_middleware(
 # =============================================================================
 
 MENTORS = {
-    "raava":    {"name": "Raava",           "voice": "es-MX-DaliaNeural",  "base_prompt": "Eres Raava, una mentora IA empática, paciente y clara. Tu objetivo es guiar sin juzgar."},
+    "raava":    {"name": "Raava",           "voice": "es-MX-DaliaNeural",  "base_prompt": "Eres Raava, una mentora IA súper empática, paciente y clara. Tu objetivo es guiar sin juzgar."},
     "newton":   {"name": "Isaac Newton",    "voice": "es-MX-JorgeNeural",  "base_prompt": "Eres Sir Isaac Newton. Eres riguroso y te obsesiona la precisión. Usas analogías físicas."},
     "einstein": {"name": "Albert Einstein",  "voice": "es-ES-AlvaroNeural", "base_prompt": "Eres Albert Einstein. Eres humilde, curioso y usas analogías visuales y experimentos mentales."},
 }
@@ -215,15 +226,32 @@ class TalkRequest(BaseModel):
 
 def sanitize(s: str, mx: int = 500) -> str:
     if not s: return ""
-    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s[:mx]).strip()
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(s)[:mx]).strip()
 
 def build_prompt(session, mentor):
     ud = session.get("user_data", {})
     td = session.get("topic_data", {})
-    nombre  = sanitize(ud.get("nombre", "Estudiante"), 50)
-    pasion  = sanitize(ud.get("pasion", "aprender"), 100)
-    meta    = sanitize(ud.get("meta", "entender el tema"), 200)
-    estilo  = sanitize(ud.get("aprendizaje", "visual"), 50)
+    
+    # --- EXTRACCIÓN DE ONBOARDING ---
+    nombre      = sanitize(ud.get("nombre", "Estudiante"), 50)
+    pasion      = sanitize(ud.get("q1", ud.get("pasion", "aprender cosas nuevas")), 200)
+    
+    # Procesar listas o strings para mundos, resolución, energía, dificultad
+    q2 = ud.get("q2", [])
+    mundos = ", ".join(q2) if isinstance(q2, list) else sanitize(str(q2), 200)
+    
+    q3 = ud.get("q3", [])
+    resolucion = ", ".join(q3) if isinstance(q3, list) else sanitize(str(q3), 200)
+    
+    q4 = ud.get("q4", [])
+    energia = ", ".join(q4) if isinstance(q4, list) else sanitize(str(q4), 200)
+    
+    q5 = ud.get("q5", [])
+    dificultad = ", ".join(q5) if isinstance(q5, list) else sanitize(str(q5), 200)
+    
+    meta_final  = sanitize(ud.get("q6", ud.get("meta", "mejorar como persona")), 300)
+
+    # --- DATOS ACADÉMICOS ---
     title   = sanitize(td.get("title", session.get("current_topic", "General")), 200)
     obj     = sanitize(td.get("objective", ""), 500)
     crit    = sanitize(td.get("success_criteria", ""), 500)
@@ -231,32 +259,34 @@ def build_prompt(session, mentor):
     materia = sanitize(session.get("materia_title", ""), 100)
     guide_block = f"\n    --- GUÍA PEDAGÓGICA ---\n    {guide}" if guide else ""
 
+    # --- SUPER PROMPT ---
     return f"""
     {mentor['base_prompt']}
 
-    --- ALUMNO ---
+    --- PERFIL PSICOLÓGICO DEL ALUMNO ---
     Nombre: {nombre}
-    Pasión: {pasion} (usa esto para analogías)
-    Meta: "{meta}"
-    Estilo: {estilo}
+    Pasión principal: "{pasion}" -> DEBES USAR ESTO COMO BASE PARA TUS ANALOGÍAS.
+    Mundos que le atraen: {mundos if mundos else 'Varios'}
+    Cuando no entiende algo, suele: {resolucion if resolucion else 'Buscar ayuda'} -> ADÁPTATE A ESTE ESTILO.
+    Lo que le genera energía: {energia if energia else 'El descubrimiento'}
+    Lo que le cuesta al estudiar: {dificultad if dificultad else 'Mantener foco'} -> SÉ MUY COMPRENSIVO CON ESTO.
+    Sueño/Meta fuera de la escuela: "{meta_final}" -> CONECTA EL APRENDIZAJE CON ESTA META PARA MOTIVARLO.
 
-    --- TEMA ---
+    --- TEMA A ENSEÑAR ---
     Materia: {materia}
-    Tema: {title}
+    Tema actual: {title}
     {"Objetivo: " + obj if obj else ""}
     {"Criterio de éxito: " + crit if crit else ""}
     {guide_block}
 
-    --- INSTRUCCIONES ---
-    1. Enseña ESPECÍFICAMENTE sobre "{title}".
-    2. Máx 3-4 oraciones por turno. Conversa, no des cátedra.
-    3. Analogías con "{pasion}".
-    4. Pregunta de comprobación al final de cada turno.
-    5. Si no entiende, reexplica con otro ejemplo.
-    6. Si entendió, avanza al siguiente concepto.
-    7. Celebra logros. Sé cálido.
-    8. Español (salvo que el tema sea inglés).
-    9. No inventes datos falsos.
+    --- REGLAS ESTRICTAS DE INTERACCIÓN ---
+    1. Enseña EXCLUSIVAMENTE sobre "{title}". No te desvíes.
+    2. Mantén respuestas cortas (máximo 3-4 oraciones). Es una conversación fluida por chat.
+    3. OBLIGATORIO: Crea una analogía inteligente que relacione "{title}" con su pasión ("{pasion}").
+    4. Haz siempre UNA pequeña pregunta de comprobación al final de tu turno.
+    5. Si el estudiante se equivoca o se frustra, recuerda que le cuesta "{dificultad}"; ten paciencia y busca otro enfoque.
+    6. Muestra entusiasmo genuino sobre cómo este tema le ayudará a lograr su meta de "{meta_final}".
+    7. Responde siempre en Español (salvo que sea clase de Inglés).
     """
 
 def cleanup_sessions():
@@ -279,17 +309,21 @@ def clean_tts(text: str) -> str:
 
 @app.get("/")
 async def health():
-    return {"status": "online", "version": "3.1.0", "sessions": len(sessions), "env": ENVIRONMENT}
+    return {"status": "online", "version": "3.2.0", "sessions": len(sessions), "env": ENVIRONMENT}
 
 @app.post("/init_session")
 async def init_session(req: InitSessionRequest):
     if len(sessions) > MAX_SESSIONS: cleanup_sessions()
     title = (req.topic_data or {}).get("title") or req.current_topic or "General"
-    logging.info(f"🆕 {req.user_data.get('nombre','?')} → {title}")
+    logging.info(f"🆕 Nueva sesión: {req.user_data.get('nombre','?')} → Tema: {title}")
+    
     sessions[req.session_id] = {
-        "history": [], "user_data": req.user_data,
-        "topic_data": req.topic_data or {}, "current_topic": title,
-        "materia_title": req.materia_title or "", "mentor_id": req.mentor_id,
+        "history": [], 
+        "user_data": req.user_data,
+        "topic_data": req.topic_data or {}, 
+        "current_topic": title,
+        "materia_title": req.materia_title or "", 
+        "mentor_id": req.mentor_id,
         "last_active": time.time(),
     }
     return {"status": "success", "topic": title}
@@ -299,18 +333,24 @@ async def chat(req: ChatRequest):
     try:
         if not OPENROUTER_API_KEY:
             return JSONResponse(status_code=503, content={"error": "API no configurada."})
+            
         if req.session_id not in sessions:
             sessions[req.session_id] = {
-                "history": [], "user_data": req.user_context or {},
+                "history": [], 
+                "user_data": req.user_context or {},
                 "topic_data": {"title": req.topic_title or "General"},
                 "current_topic": req.topic_title or "General",
-                "materia_title": "", "mentor_id": req.mentor_id,
+                "materia_title": "", 
+                "mentor_id": req.mentor_id,
                 "last_active": time.time(),
             }
+            
         sess = sessions[req.session_id]
         sess["last_active"] = time.time()
+        
         if req.user_context:
             sess["user_data"].update({k: v for k, v in req.user_context.items() if v})
+            
         if len(sess["history"]) > MAX_HISTORY:
             sess["history"] = sess["history"][-MAX_HISTORY:]
 
@@ -319,11 +359,12 @@ async def chat(req: ChatRequest):
         msgs.extend(sess["history"][-10:])
         msgs.append({"role": "user", "content": req.message})
 
+        # --- LLAMADA A LA IA ---
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 OPENROUTER_URL,
                 json={"model": MODEL_NAME, "messages": msgs, "temperature": 0.4, "max_tokens": 400},
-                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": "https://raava.edu"},
+                headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": "https://raavaedu.com"},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
                 if resp.status == 429:
@@ -336,8 +377,23 @@ async def chat(req: ChatRequest):
                     return JSONResponse(status_code=502, content={"error": "Respuesta vacía."})
                 reply = data["choices"][0]["message"]["content"].replace("[[NEXT_TOPIC]]", "").strip()
 
+        # Actualizar historial local
         sess["history"].append({"role": "user", "content": req.message})
         sess["history"].append({"role": "assistant", "content": reply})
+
+        # --- GUARDAR EN SUPABASE ---
+        if supabase:
+            # Aseguramos que user_id sea un string o None para evitar errores de tipo
+            user_id = sess["user_data"].get("user_id") or sess["user_data"].get("id")
+            try:
+                # Guardar mensajes (con user_id opcional)
+                supabase.table("chat_history").insert([
+                    {"session_id": req.session_id, "user_id": user_id, "role": "user", "content": req.message},
+                    {"session_id": req.session_id, "user_id": user_id, "role": "assistant", "content": reply}
+                ]).execute()
+            except Exception as e:
+                logging.error(f"Error guardando en Supabase: {e}")
+
         return {"reply": reply}
 
     except asyncio.TimeoutError:
@@ -390,7 +446,7 @@ async def talk(req: TalkRequest, background_tasks: BackgroundTasks):
 
 @app.on_event("startup")
 async def startup():
-    logging.info(f"🚀 Raava v3.1.0 ({ENVIRONMENT}) | CORS: {ALLOWED_ORIGINS}")
+    logging.info(f"🚀 Raava v3.2.0 ({ENVIRONMENT}) | CORS: {ALLOWED_ORIGINS}")
     if not OPENROUTER_API_KEY: logging.warning("⚠️ OPENROUTER_API_KEY no configurada")
     if not DEEPGRAM_API_KEY: logging.warning("⚠️ DEEPGRAM_API_KEY no configurada")
     async def periodic():
