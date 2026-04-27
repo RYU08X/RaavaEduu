@@ -226,7 +226,7 @@ class TalkRequest(BaseModel):
 
 def sanitize(s: str, mx: int = 500) -> str:
     if not s: return ""
-    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(s)[:mx]).strip()
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', s[:mx]).strip()
 
 def build_prompt(session, mentor):
     ud = session.get("user_data", {})
@@ -315,10 +315,21 @@ async def health():
 async def init_session(req: InitSessionRequest):
     if len(sessions) > MAX_SESSIONS: cleanup_sessions()
     title = (req.topic_data or {}).get("title") or req.current_topic or "General"
-    logging.info(f"🆕 Nueva sesión: {req.user_data.get('nombre','?')} → Tema: {title}")
+    logging.info(f"🆕 Inicializando sesión: {req.user_data.get('nombre','?')} → Tema: {title}")
     
+    history = []
+    # --- RECUPERAR HISTORIAL DE SUPABASE ---
+    if supabase:
+        try:
+            res = supabase.table("chat_history").select("role, content").eq("session_id", req.session_id).order("created_at").execute()
+            if res.data:
+                history = [{"role": r["role"], "content": r["content"]} for r in res.data]
+                logging.info(f"✅ Historial restaurado: {len(history)} mensajes para la sesión {req.session_id}")
+        except Exception as e:
+            logging.error(f"Error restaurando historial de Supabase: {e}")
+
     sessions[req.session_id] = {
-        "history": [], 
+        "history": history, 
         "user_data": req.user_data,
         "topic_data": req.topic_data or {}, 
         "current_topic": title,
@@ -326,7 +337,7 @@ async def init_session(req: InitSessionRequest):
         "mentor_id": req.mentor_id,
         "last_active": time.time(),
     }
-    return {"status": "success", "topic": title}
+    return {"status": "success", "topic": title, "history_recovered": len(history)}
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
@@ -335,8 +346,17 @@ async def chat(req: ChatRequest):
             return JSONResponse(status_code=503, content={"error": "API no configurada."})
             
         if req.session_id not in sessions:
+            history = []
+            if supabase:
+                try:
+                    res = supabase.table("chat_history").select("role, content").eq("session_id", req.session_id).order("created_at").execute()
+                    if res.data:
+                        history = [{"role": r["role"], "content": r["content"]} for r in res.data]
+                except Exception:
+                    pass
+
             sessions[req.session_id] = {
-                "history": [], 
+                "history": history, 
                 "user_data": req.user_context or {},
                 "topic_data": {"title": req.topic_title or "General"},
                 "current_topic": req.topic_title or "General",
@@ -383,14 +403,23 @@ async def chat(req: ChatRequest):
 
         # --- GUARDAR EN SUPABASE ---
         if supabase:
-            # Aseguramos que user_id sea un string o None para evitar errores de tipo
-            user_id = sess["user_data"].get("user_id") or sess["user_data"].get("id")
+            user_id = sess["user_data"].get("user_id") # Extraído del payload frontend
             try:
-                # Guardar mensajes (con user_id opcional)
-                supabase.table("chat_history").insert([
-                    {"session_id": req.session_id, "user_id": user_id, "role": "user", "content": req.message},
-                    {"session_id": req.session_id, "user_id": user_id, "role": "assistant", "content": reply}
-                ]).execute()
+                # Guardar mensaje del usuario
+                supabase.table("chat_history").insert({
+                    "session_id": req.session_id,
+                    "user_id": user_id,
+                    "role": "user",
+                    "content": req.message
+                }).execute()
+                
+                # Guardar respuesta de IA
+                supabase.table("chat_history").insert({
+                    "session_id": req.session_id,
+                    "user_id": user_id,
+                    "role": "assistant",
+                    "content": reply
+                }).execute()
             except Exception as e:
                 logging.error(f"Error guardando en Supabase: {e}")
 
