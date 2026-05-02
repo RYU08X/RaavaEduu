@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import re
 import tempfile
@@ -60,6 +61,7 @@ RATE_CHAT      = 30
 RATE_LISTEN    = 15
 RATE_TALK      = 20
 RATE_INIT      = 10
+RATE_EXAM      = 10
 RATE_GENERAL   = 60
 MAX_SESSIONS   = 5000
 MAX_HISTORY    = 30
@@ -116,7 +118,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             ip = request.client.host if request.client else "unknown"
         if not rate_limiter.is_allowed(f"g:{ip}", RATE_GENERAL):
             return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes."})
-        limits = {"/chat": RATE_CHAT, "/init_session": RATE_INIT, "/listen": RATE_LISTEN, "/talk": RATE_TALK}
+        limits = {"/chat": RATE_CHAT, "/init_session": RATE_INIT, "/listen": RATE_LISTEN, "/talk": RATE_TALK, "/generate_exam": RATE_EXAM}
         path = request.url.path
         if path in limits and not rate_limiter.is_allowed(f"{path}:{ip}", limits[path]):
             return JSONResponse(status_code=429, content={"error": "Demasiadas solicitudes para este servicio."})
@@ -211,6 +213,20 @@ class ChatRequest(BaseModel):
 class TalkRequest(BaseModel):
     text: str
     mentor_id: str = "raava"
+
+class GenerateExamRequest(BaseModel):
+    topics: list
+    difficulty: str = "Medio"
+    count: int = 10
+
+    @validator("topics")
+    def v_topics(cls, v):
+        if not v or len(v) > 10: raise ValueError("topics inválido")
+        return [str(t)[:200] for t in v]
+    @validator("difficulty")
+    def v_diff(cls, v): return v if v in ["Fácil", "Medio", "Difícil"] else "Medio"
+    @validator("count")
+    def v_count(cls, v): return max(5, min(35, v))
 
     @validator("text")
     def v_txt(cls, v):
@@ -472,6 +488,71 @@ async def talk(req: TalkRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         logging.error(f"Talk error: {e}")
         return JSONResponse(status_code=500, content={"error": "Error generando audio."})
+
+@app.post("/generate_exam")
+async def generate_exam(req: GenerateExamRequest):
+    try:
+        if not OPENROUTER_API_KEY:
+            return JSONResponse(status_code=503, content={"error": "API no configurada."})
+
+        topics_str = ", ".join(req.topics)
+        diff_map = {
+            "Fácil":   "básico, con opciones claras y distractores simples",
+            "Medio":   "intermedio, con conceptos clave y distractores plausibles",
+            "Difícil": "avanzado, con razonamiento profundo y distractores muy similares",
+        }
+        diff_desc = diff_map.get(req.difficulty, "intermedio")
+
+        prompt = (
+            f"Genera exactamente {req.count} preguntas de opción múltiple en español sobre: {topics_str}.\n"
+            f"Nivel de dificultad: {diff_desc}.\n\n"
+            "Responde ÚNICAMENTE con JSON válido con esta estructura exacta (sin markdown, sin texto extra):\n"
+            '{"questions": [{"question": "texto","options": ["A","B","C","D"],"correct_answer": "A"}]}\n\n'
+            f"REGLAS: exactamente {req.count} preguntas, 4 opciones c/u, correct_answer idéntico a un valor de options, sin numeración en opciones."
+        )
+
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                OPENROUTER_URL,
+                json={
+                    "model": MODEL_NAME,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.7,
+                    "max_tokens": 4000,
+                    "response_format": {"type": "json_object"},
+                },
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "https://raavaedu.com",
+                },
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status == 429:
+                    return JSONResponse(status_code=429, content={"error": "La IA está ocupada."})
+                if resp.status != 200:
+                    logging.error(f"OpenRouter exam {resp.status}: {(await resp.text())[:200]}")
+                    return JSONResponse(status_code=502, content={"error": "Error al generar examen."})
+                data = await resp.json()
+                if not data.get("choices"):
+                    return JSONResponse(status_code=502, content={"error": "Respuesta vacía."})
+                content = data["choices"][0]["message"]["content"]
+
+        exam_data = json.loads(content)
+        questions = exam_data.get("questions", [])
+        if not questions:
+            return JSONResponse(status_code=502, content={"error": "No se generaron preguntas."})
+        return {"questions": questions}
+
+    except json.JSONDecodeError as e:
+        logging.error(f"JSON parse error exam: {e}")
+        return JSONResponse(status_code=502, content={"error": "Error parseando respuesta de IA."})
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"error": "Timeout generando examen."})
+    except Exception as e:
+        logging.error(f"Generate exam error: {e}")
+        return JSONResponse(status_code=500, content={"error": "Error interno."})
+
 
 @app.on_event("startup")
 async def startup():
