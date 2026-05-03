@@ -213,6 +213,13 @@ class ChatRequest(BaseModel):
 class TalkRequest(BaseModel):
     text: str
     mentor_id: str = "raava"
+    @validator("text")
+    def v_txt(cls, v):
+        if not v or not v.strip(): raise ValueError("Texto vacío")
+        if len(v) > 3000: raise ValueError("Texto demasiado largo")
+        return v.strip()
+    @validator("mentor_id")
+    def v_mid(cls, v): return v if v in MENTORS else "raava"
 
 class GenerateExamRequest(BaseModel):
     topics: list
@@ -228,13 +235,7 @@ class GenerateExamRequest(BaseModel):
     @validator("count")
     def v_count(cls, v): return max(5, min(35, v))
 
-    @validator("text")
-    def v_txt(cls, v):
-        if not v or not v.strip(): raise ValueError("Texto vacío")
-        if len(v) > 3000: raise ValueError("Texto demasiado largo")
-        return v.strip()
-    @validator("mentor_id")
-    def v_mid(cls, v): return v if v in MENTORS else "raava"
+
 
 # =============================================================================
 # HELPERS
