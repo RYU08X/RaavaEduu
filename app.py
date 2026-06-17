@@ -42,7 +42,7 @@ else:
     supabase = None
     logging.warning("⚠️ Credenciales de Supabase no encontradas. El historial no se guardará.")
 
-MODEL_NAME     = "google/gemini-2.0-flash-001"
+MODEL_NAME     = "google/gemini-2.5-flash-lite"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 ALLOWED_ORIGINS = [
