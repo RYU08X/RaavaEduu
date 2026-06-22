@@ -6,6 +6,7 @@ import tempfile
 import uuid
 import time
 import asyncio
+import random
 from contextlib import asynccontextmanager
 from typing import Dict, Optional
 from collections import defaultdict
@@ -640,8 +641,8 @@ async def generate_exam(req: GenerateExamRequest):
             f"Genera exactamente {req.count} preguntas de opción múltiple en español sobre: {topics_str}.\n"
             f"Nivel de dificultad: {diff_desc}.\n\n"
             "Responde ÚNICAMENTE con JSON válido con esta estructura exacta (sin markdown, sin texto extra):\n"
-            '{"questions": [{"question": "texto","options": ["A","B","C","D"],"correct_answer": "A"}]}\n\n'
-            f"REGLAS: exactamente {req.count} preguntas, 4 opciones c/u, correct_answer idéntico a un valor de options, sin numeración en opciones."
+            '{"questions": [{"question": "texto de la pregunta","options": ["respuesta correcta","distractor 1","distractor 2","distractor 3"],"correct_answer": "respuesta correcta"}]}\n\n'
+            f"REGLAS: exactamente {req.count} preguntas, 4 opciones c/u, correct_answer idéntico a un valor de options, sin numeración en opciones. Aleatoriza la posición de la respuesta correcta entre las opciones."
         )
 
         max_tokens = max(4000, req.count * 300)
@@ -686,6 +687,14 @@ async def generate_exam(req: GenerateExamRequest):
         questions = exam_data.get("questions", [])
         if not questions:
             return JSONResponse(status_code=502, content={"error": "No se generaron preguntas."})
+            
+        for q in questions:
+            opts = q.get("options", [])
+            correct = q.get("correct_answer")
+            if opts and isinstance(opts, list) and correct in opts:
+                random.shuffle(opts)
+                q["options"] = opts
+
         return {"questions": questions}
 
     except json.JSONDecodeError as e:
