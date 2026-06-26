@@ -344,7 +344,7 @@ def build_prompt(session):
 
     --- REGLAS ESTRICTAS DE INTERACCIÓN ---
     1. Enseña EXCLUSIVAMENTE sobre "{title}". No te desvíes.
-    2. Mantén respuestas cortas (máximo 3-4 oraciones). Es una conversación fluida por chat.
+    2. Respuestas MUY cortas: máximo 3 oraciones en total. Sin listas largas. Si das un ejemplo, da UNO solo, breve.
     3. OBLIGATORIO: Crea una analogía inteligente que relacione "{title}" con la pasión del alumno.
     4. Haz siempre UNA pequeña pregunta de comprobación al final de tu turno.
     5. Si el estudiante se equivoca o se frustra, ten paciencia y busca otro enfoque.
@@ -534,7 +534,7 @@ async def chat(req: ChatRequest):
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 OPENROUTER_URL,
-                json={"model": MODEL_NAME, "messages": msgs, "temperature": 0.4, "max_tokens": 180},
+                json={"model": MODEL_NAME, "messages": msgs, "temperature": 0.4, "max_tokens": 200},
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": "https://raavaedu.com"},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
