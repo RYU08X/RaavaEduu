@@ -240,18 +240,19 @@ class TalkRequest(BaseModel):
         return v.strip()
 
 class GenerateExamRequest(BaseModel):
-    topics: list
+    topic_ids: list
+    topic_names: list
     difficulty: str = "Medio"
     count: int = 10
 
-    @validator("topics")
+    @validator("topic_names")
     def v_topics(cls, v):
         if not v or len(v) > 10: raise ValueError("topics inválido")
         return [str(t)[:200] for t in v]
     @validator("difficulty")
     def v_diff(cls, v): return v if v in ["Fácil", "Medio", "Difícil"] else "Medio"
     @validator("count")
-    def v_count(cls, v): return max(5, min(35, v))
+    def v_count(cls, v): return max(5, min(30, v))
 
 # =============================================================================
 # HELPERS
@@ -533,7 +534,7 @@ async def chat(req: ChatRequest):
         async with aiohttp.ClientSession() as client:
             async with client.post(
                 OPENROUTER_URL,
-                json={"model": MODEL_NAME, "messages": msgs, "temperature": 0.4, "max_tokens": 400},
+                json={"model": MODEL_NAME, "messages": msgs, "temperature": 0.4, "max_tokens": 180},
                 headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json", "HTTP-Referer": "https://raavaedu.com"},
                 timeout=aiohttp.ClientTimeout(total=30),
             ) as resp:
@@ -629,7 +630,7 @@ async def generate_exam(req: GenerateExamRequest):
         if not OPENROUTER_API_KEY:
             return JSONResponse(status_code=503, content={"error": "API no configurada."})
 
-        topics_str = ", ".join(req.topics)
+        topics_str = ", ".join(req.topic_names)
         diff_map = {
             "Fácil":   "básico, con opciones claras y distractores simples",
             "Medio":   "intermedio, con conceptos clave y distractores plausibles",
@@ -637,13 +638,53 @@ async def generate_exam(req: GenerateExamRequest):
         }
         diff_desc = diff_map.get(req.difficulty, "intermedio")
 
-        prompt = (
-            f"Genera exactamente {req.count} preguntas de opción múltiple en español sobre: {topics_str}.\n"
-            f"Nivel de dificultad: {diff_desc}.\n\n"
-            "Responde ÚNICAMENTE con JSON válido con esta estructura exacta (sin markdown, sin texto extra):\n"
-            '{"questions": [{"question": "texto de la pregunta","options": ["respuesta correcta","distractor 1","distractor 2","distractor 3"],"correct_answer": "respuesta correcta"}]}\n\n'
-            f"REGLAS: exactamente {req.count} preguntas, 4 opciones c/u, correct_answer idéntico a un valor de options, sin numeración en opciones. Aleatoriza la posición de la respuesta correcta entre las opciones."
-        )
+        # Distribuir equitativamente las preguntas entre los temas
+        topic_counts = {}
+        for i, tid in enumerate(req.topic_ids):
+            topic_counts[tid] = req.count // len(req.topic_ids) + (1 if i < req.count % len(req.topic_ids) else 0)
+
+        base_questions = []
+        if supabase:
+            for tid, c in topic_counts.items():
+                if c > 0:
+                    try:
+                        res = await asyncio.to_thread(
+                            lambda tid_val=tid: supabase.table("question_bank")
+                                    .select("*")
+                                    .eq("topic_id", tid_val)
+                                    .execute()
+                        )
+                        data = res.data or []
+                        if data:
+                            random.shuffle(data)
+                            base_questions.extend(data[:c])
+                    except Exception as e:
+                        logging.error(f"Error fetching from question_bank for topic_id {tid}: {e}")
+
+        if not base_questions:
+            # Fallback en caso de que no haya base de datos de preguntas: le pedimos a la IA que las genere.
+            bq_json = "[]"
+            prompt = (
+                f"Genera exactamente {req.count} preguntas de opción múltiple en español sobre: {topics_str}.\n"
+                f"Nivel de dificultad: {diff_desc}.\n\n"
+                "Usa un tono entretenido y personalizado para un estudiante (ej. si aplica, usa analogías de autos, videojuegos, etc).\n\n"
+                "Responde ÚNICAMENTE con JSON válido con esta estructura exacta (sin markdown, sin texto extra):\n"
+                '{"questions": [{"question": "texto de la pregunta","options": ["respuesta correcta","distractor 1","distractor 2","distractor 3"],"correct_answer": "respuesta correcta"}]}\n\n'
+                f"REGLAS: exactamente {req.count} preguntas, 4 opciones c/u, correct_answer idéntico a un valor de options, sin numeración en opciones. Aleatoriza la posición de la respuesta correcta entre las opciones."
+            )
+        else:
+            # Le pedimos a la IA que reescriba las preguntas base
+            bq_json = json.dumps([{"question_text": q["question_text"], "options": q["options"], "correct_answer": q["correct_answer"]} for q in base_questions], ensure_ascii=False)
+            prompt = (
+                f"Actúa como un profesor creativo. Aquí tienes {len(base_questions)} preguntas base sobre: {topics_str}.\n"
+                f"Tu tarea es reescribir estas preguntas para hacerlas más personalizadas y entretenidas para el alumno, "
+                f"manteniendo la dificultad en nivel '{diff_desc}' y conservando el concepto exacto de la respuesta correcta y los distractores.\n\n"
+                f"Ejemplo: Si la pregunta dice 'Juan tiene 7 + 3 manzanas', puedes cambiarla a 'Juan tiene 7 + 3 autos deportivos'.\n\n"
+                f"PREGUNTAS BASE:\n{bq_json}\n\n"
+                "Responde ÚNICAMENTE con JSON válido con la siguiente estructura (sin markdown, sin texto extra):\n"
+                '{"questions": [{"question": "texto personalizado de la pregunta","options": ["opcion 1","opcion 2","opcion 3","opcion 4"],"correct_answer": "opcion correcta"}]}\n\n'
+                f"REGLAS: exactamente {len(base_questions)} preguntas, 4 opciones por pregunta. No incluyas explicaciones."
+            )
 
         max_tokens = max(4000, req.count * 300)
 
@@ -651,7 +692,7 @@ async def generate_exam(req: GenerateExamRequest):
             async with client.post(
                 OPENROUTER_URL,
                 json={
-                    "model": MODEL_NAME,
+                    "model": "meta-llama/llama-3.1-8b-instruct",
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7,
                     "max_tokens": max_tokens,
