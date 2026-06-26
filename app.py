@@ -355,6 +355,17 @@ def build_prompt(session):
     7. Responde siempre en Español (salvo que sea clase de Inglés).
     """
 
+def build_mini_prompt(session):
+    ud = session.get("user_data", {})
+    nombre = sanitize(ud.get("nombre", "estudiante"), 30)
+    pasion = sanitize(ud.get("q1", ud.get("pasion", "aprender")), 150)
+    title  = sanitize(session.get("current_topic", "este tema"), 100)
+    return (
+        f"Eres Raava, mentora IA. Tema: \"{title}\". Alumno: {nombre}. Intereses: {pasion}. "
+        f"REGLAS: máximo 3 oraciones, usa los intereses del alumno para crear analogías, "
+        f"termina con una pregunta breve de comprobación. Solo español."
+    )
+
 async def cleanup_sessions():
     global redis_client
     if redis_client:
@@ -504,10 +515,11 @@ async def chat(req: ChatRequest):
         if not OPENROUTER_API_KEY:
             return JSONResponse(status_code=503, content={"error": "API no configurada."})
 
+        is_mini = req.session_id.startswith("mc_")
         sess = await get_session(req.session_id)
         if not sess:
             history = []
-            if supabase:
+            if supabase and not is_mini:
                 try:
                     res = await asyncio.to_thread(
                         lambda: supabase.table("chat_history")
@@ -536,8 +548,8 @@ async def chat(req: ChatRequest):
         if len(sess["history"]) > MAX_HISTORY:
             sess["history"] = sess["history"][-MAX_HISTORY:]
 
-        msgs = [{"role": "system", "content": build_prompt(sess)}]
-        msgs.extend(sess["history"][-10:])
+        msgs = [{"role": "system", "content": build_mini_prompt(sess) if is_mini else build_prompt(sess)}]
+        msgs.extend(sess["history"][-(6 if is_mini else 10):])
         msgs.append({"role": "user", "content": req.message})
 
         async with aiohttp.ClientSession() as client:
@@ -566,7 +578,7 @@ async def chat(req: ChatRequest):
         sess["history"].append({"role": "assistant", "content": reply})
         await save_session(req.session_id, sess)
 
-        if supabase:
+        if supabase and not is_mini:
             user_id = sess["user_data"].get("user_id")
             try:
                 await asyncio.to_thread(
