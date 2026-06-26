@@ -87,6 +87,9 @@ MAX_AUDIO_SIZE = int(os.getenv("MAX_AUDIO_SIZE", str(10 * 1024 * 1024)))
 
 redis_client = None
 
+# Contador de tokens por usuario por día (en memoria, se resetea al reiniciar)
+token_counters: Dict[str, int] = defaultdict(int)
+
 # =============================================================================
 # SESSION MANAGER (STATELESS WITH LOCAL FALLBACK)
 # =============================================================================
@@ -454,6 +457,12 @@ async def health():
         "redis_connected": redis_client is not None,
     }
 
+@app.get("/token_stats")
+async def token_stats():
+    today = time.strftime("%Y-%m-%d")
+    today_data = {k.split(":", 1)[1]: v for k, v in token_counters.items() if k.startswith(today)}
+    return {"date": today, "users": today_data, "total_today": sum(today_data.values())}
+
 @app.post("/init_session")
 async def init_session(req: InitSessionRequest):
     global redis_client
@@ -547,6 +556,11 @@ async def chat(req: ChatRequest):
                 if not data.get("choices"):
                     return JSONResponse(status_code=502, content={"error": "Respuesta vacía."})
                 reply = data["choices"][0]["message"]["content"].replace("[[NEXT_TOPIC]]", "").strip()
+                total_tokens = data.get("usage", {}).get("total_tokens", 0)
+                user_id_key = sess["user_data"].get("user_id", "anon")
+                day_key = f"{time.strftime('%Y-%m-%d')}:{user_id_key}"
+                token_counters[day_key] += total_tokens
+                logging.info(f"🪙 {user_id_key} hoy: {token_counters[day_key]:,} tokens (+{total_tokens})")
 
         sess["history"].append({"role": "user", "content": req.message})
         sess["history"].append({"role": "assistant", "content": reply})
